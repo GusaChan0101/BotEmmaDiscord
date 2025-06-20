@@ -149,6 +149,51 @@ db.serialize(() => {
         FOREIGN KEY(ticket_id) REFERENCES tickets(id)
     )`);
     
+    // Tabela de cargos VIP
+    db.run(`CREATE TABLE IF NOT EXISTS vip_roles (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id TEXT NOT NULL,
+        vip_type TEXT NOT NULL,
+        role_id TEXT NOT NULL,
+        created_at INTEGER DEFAULT (strftime('%s', 'now')),
+        UNIQUE(guild_id, vip_type)
+    )`);
+    
+    // Tabela de configurações VIP
+    db.run(`CREATE TABLE IF NOT EXISTS vip_settings (
+        guild_id TEXT PRIMARY KEY,
+        vip_category_id TEXT,
+        created_at INTEGER DEFAULT (strftime('%s', 'now'))
+    )`);
+    
+    // Tabela de tags VIP
+    db.run(`CREATE TABLE IF NOT EXISTS vip_tags (
+        user_id TEXT NOT NULL,
+        guild_id TEXT NOT NULL,
+        tag TEXT NOT NULL,
+        created_at INTEGER DEFAULT (strftime('%s', 'now')),
+        PRIMARY KEY(user_id, guild_id)
+    )`);
+    
+    // Tabela de calls VIP
+    db.run(`CREATE TABLE IF NOT EXISTS vip_calls (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        channel_id TEXT NOT NULL,
+        owner_id TEXT NOT NULL,
+        guild_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        created_at INTEGER DEFAULT (strftime('%s', 'now'))
+    )`);
+    
+    // Tabela de contador de mensagens
+    db.run(`CREATE TABLE IF NOT EXISTS message_count (
+        user_id TEXT NOT NULL,
+        guild_id TEXT NOT NULL,
+        count INTEGER DEFAULT 0,
+        last_message INTEGER DEFAULT (strftime('%s', 'now')),
+        PRIMARY KEY(user_id, guild_id)
+    )`);
+    
     console.log('✅ Todas as tabelas criadas/verificadas com sucesso!');
 });
 
@@ -188,6 +233,199 @@ client.once('ready', () => {
     // Definir status do bot
     client.user.setActivity('🎮 Anime & Games | /help', { type: 'PLAYING' });
 });
+
+// ==================== NOVOS EVENT LISTENERS ====================
+
+// Event listener para quando um membro entra no servidor
+client.on('guildMemberAdd', async (member) => {
+    try {
+        console.log(`👋 Membro entrou: ${member.user.tag} no servidor ${member.guild.name}`);
+        
+        // Buscar configurações do servidor para logs
+        db.get(`SELECT log_channel_id FROM guild_settings WHERE guild_id = ?`, 
+            [member.guild.id], async (err, settings) => {
+                if (settings?.log_channel_id) {
+                    const logChannel = member.guild.channels.cache.get(settings.log_channel_id);
+                    if (logChannel) {
+                        const embed = new EmbedBuilder()
+                            .setColor('#00ff00')
+                            .setTitle('👋 Membro Entrou')
+                            .setDescription(`**Usuário:** ${member.user}\n**Tag:** ${member.user.tag}\n**ID:** ${member.user.id}\n**Conta criada:** <t:${Math.floor(member.user.createdTimestamp / 1000)}:R>`)
+                            .setThumbnail(member.user.displayAvatarURL())
+                            .setFooter({ text: `Total de membros: ${member.guild.memberCount}` })
+                            .setTimestamp();
+                        
+                        await logChannel.send({ embeds: [embed] });
+                    }
+                }
+            });
+    } catch (error) {
+        console.error('Erro no evento guildMemberAdd:', error);
+    }
+});
+
+// Event listener para quando um membro sai do servidor
+client.on('guildMemberRemove', async (member) => {
+    try {
+        console.log(`👋 Membro saiu: ${member.user.tag} do servidor ${member.guild.name}`);
+        
+        // Limpar todos os dados do usuário neste servidor
+        await cleanUserDataOnLeave(member.user.id, member.guild.id, db);
+        
+        // Log da saída
+        db.get(`SELECT log_channel_id FROM guild_settings WHERE guild_id = ?`, 
+            [member.guild.id], async (err, settings) => {
+                if (settings?.log_channel_id) {
+                    const logChannel = member.guild.channels.cache.get(settings.log_channel_id);
+                    if (logChannel) {
+                        const embed = new EmbedBuilder()
+                            .setColor('#ff0000')
+                            .setTitle('👋 Membro Saiu')
+                            .setDescription(`**Usuário:** ${member.user.tag}\n**ID:** ${member.user.id}\n**🗑️ Dados limpos:** Tempo de voz, VIP, tickets, verificações`)
+                            .setThumbnail(member.user.displayAvatarURL())
+                            .setFooter({ text: `Total de membros: ${member.guild.memberCount}` })
+                            .setTimestamp();
+                        
+                        await logChannel.send({ embeds: [embed] });
+                    }
+                }
+            });
+    } catch (error) {
+        console.error('Erro no evento guildMemberRemove:', error);
+    }
+});
+
+// Função para limpar dados do usuário quando sair do servidor
+async function cleanUserDataOnLeave(userId, guildId, db) {
+    try {
+        console.log(`🗑️ Limpando dados do usuário ${userId} no servidor ${guildId}`);
+        
+        // 1. Remover do ranking de tempo de voz
+        db.run(`DELETE FROM voice_time WHERE user_id = ? AND guild_id = ?`, 
+            [userId, guildId], function(err) {
+                if (err) console.error('Erro ao limpar voice_time:', err);
+                else if (this.changes > 0) console.log(`✅ Removido do ranking de voz: ${userId}`);
+            });
+        
+        // 2. Remover VIP
+        db.run(`DELETE FROM vips WHERE user_id = ? AND guild_id = ?`, 
+            [userId, guildId], function(err) {
+                if (err) console.error('Erro ao limpar VIPs:', err);
+                else if (this.changes > 0) console.log(`✅ VIP removido: ${userId}`);
+            });
+        
+        // 3. Remover tags VIP
+        db.run(`DELETE FROM vip_tags WHERE user_id = ? AND guild_id = ?`, 
+            [userId, guildId], function(err) {
+                if (err) console.error('Erro ao limpar vip_tags:', err);
+                else if (this.changes > 0) console.log(`✅ Tag VIP removida: ${userId}`);
+            });
+        
+        // 4. Fechar tickets abertos e deletar calls associadas
+        db.all(`SELECT t.id, t.channel_id FROM tickets t WHERE t.user_id = ? AND t.guild_id = ? AND t.status = 'open'`,
+            [userId, guildId], async (err, tickets) => {
+                if (tickets && tickets.length > 0) {
+                    for (const ticket of tickets) {
+                        // Fechar ticket no banco
+                        db.run(`UPDATE tickets SET status = 'closed', closed_at = ? WHERE id = ?`,
+                            [Math.floor(Date.now() / 1000), ticket.id]);
+                        
+                        // Deletar canal do ticket se ainda existir
+                        try {
+                            const guild = client.guilds.cache.get(guildId);
+                            if (guild) {
+                                const ticketChannel = guild.channels.cache.get(ticket.channel_id);
+                                if (ticketChannel) {
+                                    await ticketChannel.delete();
+                                    console.log(`✅ Canal de ticket deletado: ${ticket.channel_id}`);
+                                }
+                            }
+                        } catch (error) {
+                            console.error(`Erro ao deletar canal de ticket ${ticket.channel_id}:`, error);
+                        }
+                        
+                        // Deletar calls associadas ao ticket
+                        db.all(`SELECT channel_id FROM ticket_calls WHERE ticket_id = ?`, [ticket.id], async (err, calls) => {
+                            if (calls) {
+                                for (const call of calls) {
+                                    try {
+                                        const guild = client.guilds.cache.get(guildId);
+                                        if (guild) {
+                                            const callChannel = guild.channels.cache.get(call.channel_id);
+                                            if (callChannel) {
+                                                await callChannel.delete();
+                                                console.log(`✅ Call de ticket deletada: ${call.channel_id}`);
+                                            }
+                                        }
+                                    } catch (error) {
+                                        console.error(`Erro ao deletar call ${call.channel_id}:`, error);
+                                    }
+                                }
+                                // Remover calls do banco
+                                db.run(`DELETE FROM ticket_calls WHERE ticket_id = ?`, [ticket.id]);
+                            }
+                        });
+                    }
+                }
+            });
+        
+        // 5. Remover verificações
+        db.run(`DELETE FROM verifications WHERE user_id = ? AND guild_id = ?`, 
+            [userId, guildId], function(err) {
+                if (err) console.error('Erro ao limpar verificações:', err);
+                else if (this.changes > 0) console.log(`✅ Verificações removidas: ${userId}`);
+            });
+        
+        // 6. Remover warnings
+        db.run(`DELETE FROM warnings WHERE user_id = ? AND guild_id = ?`, 
+            [userId, guildId], function(err) {
+                if (err) console.error('Erro ao limpar warnings:', err);
+                else if (this.changes > 0) console.log(`✅ Warnings removidos: ${userId}`);
+            });
+        
+        // 7. Atualizar calls VIP (marcar como ex-membro)
+        db.all(`SELECT channel_id FROM vip_calls WHERE owner_id = ? AND guild_id = ?`,
+            [userId, guildId], async (err, vipCalls) => {
+                if (vipCalls && vipCalls.length > 0) {
+                    for (const call of vipCalls) {
+                        try {
+                            const guild = client.guilds.cache.get(guildId);
+                            if (guild) {
+                                const callChannel = guild.channels.cache.get(call.channel_id);
+                                if (callChannel) {
+                                    // Renomear para indicar que o dono saiu
+                                    const newName = `🔴ex-membro-${callChannel.name.replace(/🔊[🥉🥈🥇💎❌]*/g, '')}`;
+                                    await callChannel.setName(newName.substring(0, 100));
+                                    
+                                    // Remover todas as permissões do ex-membro
+                                    await callChannel.permissionOverwrites.delete(userId);
+                                    console.log(`✅ Call VIP atualizada: ${call.channel_id}`);
+                                }
+                            }
+                        } catch (error) {
+                            console.error(`Erro ao atualizar call VIP ${call.channel_id}:`, error);
+                        }
+                    }
+                    // Remover do banco as calls VIP
+                    db.run(`DELETE FROM vip_calls WHERE owner_id = ? AND guild_id = ?`, [userId, guildId]);
+                }
+            });
+        
+        // 8. Limpar contadores de mensagens
+        db.run(`DELETE FROM message_count WHERE user_id = ? AND guild_id = ?`, 
+            [userId, guildId], function(err) {
+                if (err) console.error('Erro ao limpar message_count:', err);
+                else if (this.changes > 0) console.log(`✅ Contador de mensagens removido: ${userId}`);
+            });
+        
+        console.log(`🎉 Limpeza completa para usuário ${userId} no servidor ${guildId}`);
+        
+    } catch (error) {
+        console.error('Erro na limpeza de dados do usuário:', error);
+    }
+}
+
+// ==================== EVENT LISTENERS ORIGINAIS ====================
 
 // Manipulador de interações
 client.on('interactionCreate', async (interaction) => {
@@ -340,6 +578,19 @@ client.on('voiceStateUpdate', (oldState, newState) => {
     }
 });
 
+// Event listener para contar mensagens
+client.on('messageCreate', (message) => {
+    // Ignorar bots e DMs
+    if (message.author.bot || !message.guild) return;
+    
+    // Contar mensagem
+    db.run(`INSERT OR REPLACE INTO message_count (user_id, guild_id, count, last_message) 
+            VALUES (?, ?, COALESCE((SELECT count FROM message_count WHERE user_id = ? AND guild_id = ?), 0) + 1, ?)`,
+        [message.author.id, message.guild.id, message.author.id, message.guild.id, Math.floor(Date.now() / 1000)]);
+});
+
+// ==================== FUNÇÕES DOS SISTEMAS ====================
+
 // Função para criar tickets
 async function createTicket(interaction, type, db) {
     const guild = interaction.guild;
@@ -393,7 +644,7 @@ async function createTicket(interaction, type, db) {
                     
                     // Embed de boas-vindas do ticket
                     const welcomeEmbed = new EmbedBuilder()
-                        .setColor(type === 'support' ? '#0099ff' : '#8B008B') // Azul para suporte, roxo para conselho
+                        .setColor(type === 'support' ? '#0099ff' : '#8B008B')
                         .setTitle(`🎫 Ticket ${type === 'support' ? 'de Suporte' : 'do Conselho'}`)
                         .setDescription(`Olá ${user}, bem-vindo ao seu ticket **${type === 'support' ? 'de suporte técnico' : 'do conselho'}**!\n\n${type === 'support' ? 'Descreva seu problema técnico e nossa equipe de suporte irá ajudá-lo.' : 'Este é um canal privado para questões do conselho. Descreva sua situação detalhadamente.'}\n\n🔒 **Este ticket é completamente privado.**\n⏰ Aguarde um membro da equipe aceitar o atendimento.`)
                         .setTimestamp();
@@ -887,7 +1138,63 @@ async function logTicketAction(interaction, action, ticket, user, db) {
         });
 }
 
-// Funções do painel de configuração
+// ==================== FUNÇÕES DO PAINEL DE CONFIGURAÇÃO ====================
+
+// Painel principal
+async function showMainConfigPanel(interaction, db) {
+    const embed = new EmbedBuilder()
+        .setColor('#00ff7f')
+        .setTitle('⚙️ Painel de Configuração Completo')
+        .setDescription(`**Servidor:** ${interaction.guild.name}\n**Administrador:** ${interaction.user}\n\n🎛️ Use os botões abaixo para configurar todos os sistemas!`)
+        .setThumbnail(interaction.guild.iconURL())
+        .setTimestamp();
+
+    const mainButtons = new ActionRowBuilder()
+        .addComponents(
+            new ButtonBuilder()
+                .setCustomId('config_tickets')
+                .setLabel('🎫 Sistema de Tickets')
+                .setStyle(ButtonStyle.Primary),
+            new ButtonBuilder()
+                .setCustomId('config_moderation')
+                .setLabel('🔨 Moderação & Logs')
+                .setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder()
+                .setCustomId('config_vip')
+                .setLabel('👑 Sistema VIP')
+                .setStyle(ButtonStyle.Success)
+        );
+
+    const secondaryButtons = new ActionRowBuilder()
+        .addComponents(
+            new ButtonBuilder()
+                .setCustomId('config_verification')
+                .setLabel('🛡️ Verificação')
+                .setStyle(ButtonStyle.Success),
+            new ButtonBuilder()
+                .setCustomId('config_panels')
+                .setLabel('📋 Criar Painéis')
+                .setStyle(ButtonStyle.Primary),
+            new ButtonBuilder()
+                .setCustomId('config_status')
+                .setLabel('📊 Ver Status')
+                .setStyle(ButtonStyle.Secondary)
+        );
+
+    if (interaction.replied || interaction.deferred) {
+        await interaction.editReply({
+            embeds: [embed],
+            components: [mainButtons, secondaryButtons]
+        });
+    } else {
+        await interaction.reply({
+            embeds: [embed],
+            components: [mainButtons, secondaryButtons]
+        });
+    }
+}
+
+// Configuração de tickets
 async function configureTicketsPanel(interaction, db) {
     const embed = new EmbedBuilder()
         .setColor('#0099ff')
@@ -959,11 +1266,12 @@ async function configureTicketsPanel(interaction, db) {
     });
 }
 
+// Configuração de moderação
 async function configureModerationPanel(interaction, db) {
     const embed = new EmbedBuilder()
         .setColor('#ff6600')
         .setTitle('🔨 Sistema de Moderação')
-        .setDescription('Configure o canal de logs para registrar todas as ações de moderação.\n\n**Comandos já disponíveis:**\n• `/mod ban` - Banir usuários\n• `/mod kick` - Expulsar usuários\n• `/mod mute` - Silenciar usuários\n• `/mod warn` - Advertir usuários\n• `/mod addcargo` - Adicionar cargos\n• `/mod removecargo` - Remover cargos\n• `/mod clear` - Limpar mensagens')
+        .setDescription('Configure o canal de logs para registrar todas as ações de moderação.\n\n**Comandos já disponíveis:**\n• `/mod ban` - Banir usuários\n• `/mod kick` - Expulsar usuários\n• `/mod timeout` - Timeout em usuários\n• `/mod warn` - Advertir usuários\n• `/mod clear` - Limpar mensagens')
         .setTimestamp();
 
     const components = [
@@ -989,6 +1297,7 @@ async function configureModerationPanel(interaction, db) {
     });
 }
 
+// Configuração VIP
 async function configureVIPPanel(interaction, db) {
     const embed = new EmbedBuilder()
         .setColor('#ffd700')
@@ -996,7 +1305,6 @@ async function configureVIPPanel(interaction, db) {
         .setDescription('Configure os cargos VIP e a categoria para calls permanentes.')
         .setTimestamp();
 
-    // Cada select menu deve estar em sua própria ActionRow
     const vipTypes = [
         { type: 'bronze', emoji: '🥉', label: 'VIP Bronze' },
         { type: 'prata', emoji: '🥈', label: 'VIP Prata' },
@@ -1025,8 +1333,6 @@ async function configureVIPPanel(interaction, db) {
         )
     );
 
-    // Botão voltar
-    // Se já atingiu 5 ActionRows, substitui o último pelo botão voltar
     if (components.length === 5) {
         components[4] = new ActionRowBuilder().addComponents(
             new ButtonBuilder()
@@ -1049,6 +1355,7 @@ async function configureVIPPanel(interaction, db) {
     });
 }
 
+// Configuração de verificação
 async function configureVerificationPanel(interaction, db) {
     const embed = new EmbedBuilder()
         .setColor('#00ff7f')
@@ -1096,6 +1403,7 @@ async function configureVerificationPanel(interaction, db) {
     });
 }
 
+// Menu de criação de painéis
 async function createPanelsMenu(interaction, db) {
     const embed = new EmbedBuilder()
         .setColor('#9932cc')
@@ -1130,10 +1438,10 @@ async function createPanelsMenu(interaction, db) {
     });
 }
 
+// Status completo
 async function showCompleteStatusPanel(interaction, db) {
     await interaction.deferUpdate();
 
-    // Buscar todas as estatísticas
     const stats = await gatherAllStats(interaction.guild.id, db);
 
     const embed = new EmbedBuilder()
@@ -1142,21 +1450,18 @@ async function showCompleteStatusPanel(interaction, db) {
         .setThumbnail(interaction.guild.iconURL())
         .setTimestamp();
 
-    // Configurações
     embed.addFields({
         name: '⚙️ Configurações',
         value: `🎫 Tickets: ${stats.ticketsConfigured ? '✅' : '❌'}\n🔨 Moderação: ${stats.moderationConfigured ? '✅' : '❌'}\n👑 VIP: ${stats.vipConfigured ? '✅' : '❌'}\n🛡️ Verificação: ${stats.verificationConfigured ? '✅' : '❌'}`,
         inline: true
     });
 
-    // Estatísticas gerais
     embed.addFields({
         name: '📈 Estatísticas',
         value: `🎫 Tickets: ${stats.totalTickets}\n👥 VIPs: ${stats.totalVips}\n🛡️ Verificações: ${stats.totalVerifications}\n🎤 Tempo total: ${stats.totalVoiceTime}`,
         inline: true
     });
 
-    // Atividade atual
     embed.addFields({
         name: '🔴 Atividade Atual',
         value: `🎫 Tickets abertos: ${stats.openTickets}\n🔴 Usuários em call: ${stats.usersInVoice}\n🕐 Verificações pendentes: ${stats.pendingVerifications}`,
@@ -1174,53 +1479,6 @@ async function showCompleteStatusPanel(interaction, db) {
     await interaction.editReply({
         embeds: [embed],
         components: [backButton]
-    });
-}
-
-async function showMainConfigPanel(interaction, db) {
-    // Recarregar o painel principal
-    const embed = new EmbedBuilder()
-        .setColor('#00ff7f')
-        .setTitle('⚙️ Painel de Configuração Completo')
-        .setDescription(`**Servidor:** ${interaction.guild.name}\n**Administrador:** ${interaction.user}\n\n🎛️ Use os botões abaixo para configurar todos os sistemas!`)
-        .setThumbnail(interaction.guild.iconURL())
-        .setTimestamp();
-
-    const mainButtons = new ActionRowBuilder()
-        .addComponents(
-            new ButtonBuilder()
-                .setCustomId('config_tickets')
-                .setLabel('🎫 Sistema de Tickets')
-                .setStyle(ButtonStyle.Primary),
-            new ButtonBuilder()
-                .setCustomId('config_moderation')
-                .setLabel('🔨 Moderação & Logs')
-                .setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder()
-                .setCustomId('config_vip')
-                .setLabel('👑 Sistema VIP')
-                .setStyle(ButtonStyle.Success)
-        );
-
-    const secondaryButtons = new ActionRowBuilder()
-        .addComponents(
-            new ButtonBuilder()
-                .setCustomId('config_verification')
-                .setLabel('🛡️ Verificação')
-                .setStyle(ButtonStyle.Success),
-            new ButtonBuilder()
-                .setCustomId('config_panels')
-                .setLabel('📋 Criar Painéis')
-                .setStyle(ButtonStyle.Primary),
-            new ButtonBuilder()
-                .setCustomId('config_status')
-                .setLabel('📊 Ver Status')
-                .setStyle(ButtonStyle.Secondary)
-        );
-
-    interaction.update({
-        embeds: [embed],
-        components: [mainButtons, secondaryButtons]
     });
 }
 
@@ -1252,7 +1510,7 @@ async function handleSelectMenuInteraction(interaction, db) {
         const roleId = values[0];
         
         db.run(`UPDATE guild_settings SET support_role_id = ? WHERE guild_id = ?`,
-            [roleId, interaction.guild.id], (err) => {
+            [roleId, interaction.guild.id], function(err) {
                 if (this.changes === 0) {
                     db.run(`INSERT INTO guild_settings (guild_id, support_role_id) VALUES (?, ?)`,
                         [interaction.guild.id, roleId]);
@@ -1271,7 +1529,7 @@ async function handleSelectMenuInteraction(interaction, db) {
         const roleId = values[0];
         
         db.run(`UPDATE guild_settings SET council_role_id = ? WHERE guild_id = ?`,
-            [roleId, interaction.guild.id], (err) => {
+            [roleId, interaction.guild.id], function(err) {
                 if (this.changes === 0) {
                     db.run(`INSERT INTO guild_settings (guild_id, council_role_id) VALUES (?, ?)`,
                         [interaction.guild.id, roleId]);
@@ -1290,7 +1548,7 @@ async function handleSelectMenuInteraction(interaction, db) {
         const channelId = values[0];
         
         db.run(`UPDATE guild_settings SET log_channel_id = ? WHERE guild_id = ?`,
-            [channelId, interaction.guild.id], (err) => {
+            [channelId, interaction.guild.id], function(err) {
                 if (this.changes === 0) {
                     db.run(`INSERT INTO guild_settings (guild_id, log_channel_id) VALUES (?, ?)`,
                         [interaction.guild.id, channelId]);
@@ -1306,10 +1564,9 @@ async function handleSelectMenuInteraction(interaction, db) {
 
     // Configuração de cargos VIP
     if (customId.startsWith('set_vip_role_')) {
-        const vipType = customId.split('_')[3]; // bronze, prata, ouro, diamante
+        const vipType = customId.split('_')[3];
         const roleId = values[0];
 
-        // Criar tabela VIP se não existir
         db.run(`CREATE TABLE IF NOT EXISTS vip_roles (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             guild_id TEXT NOT NULL,
@@ -1337,12 +1594,6 @@ async function handleSelectMenuInteraction(interaction, db) {
     // Configuração de categoria VIP
     if (customId === 'set_vip_category') {
         const categoryId = values[0];
-
-        db.run(`CREATE TABLE IF NOT EXISTS vip_settings (
-            guild_id TEXT PRIMARY KEY,
-            vip_category_id TEXT,
-            created_at INTEGER DEFAULT (strftime('%s', 'now'))
-        )`);
 
         db.run(`INSERT OR REPLACE INTO vip_settings (guild_id, vip_category_id) VALUES (?, ?)`,
             [interaction.guild.id, categoryId], (err) => {
@@ -1381,7 +1632,7 @@ async function handleSelectMenuInteraction(interaction, db) {
         const channelId = values[0];
 
         db.run(`UPDATE verification_settings SET verification_channel_id = ? WHERE guild_id = ?`,
-            [channelId, interaction.guild.id], (err) => {
+            [channelId, interaction.guild.id], function(err) {
                 if (this.changes === 0) {
                     db.run(`INSERT INTO verification_settings (guild_id, verified_role_id, verification_channel_id) VALUES (?, '', ?)`,
                         [interaction.guild.id, channelId]);
@@ -1411,7 +1662,6 @@ async function handleSelectMenuInteraction(interaction, db) {
 
 // Handlers para criar painéis
 async function handleCreateTicketPanel(interaction, db) {
-    // Verificar se está configurado
     db.get(`SELECT * FROM guild_settings WHERE guild_id = ?`, [interaction.guild.id], async (err, settings) => {
         if (!settings?.ticket_category_id) {
             return interaction.reply({ 
@@ -1442,7 +1692,6 @@ async function handleCreateTicketPanel(interaction, db) {
                     .setEmoji('🏛️')
             );
 
-        // Enviar para o canal atual
         const targetChannel = interaction.channel;
         
         await targetChannel.send({
@@ -1458,7 +1707,6 @@ async function handleCreateTicketPanel(interaction, db) {
 }
 
 async function handleCreateVerificationPanel(interaction, db) {
-    // Verificar se está configurado
     db.get(`SELECT * FROM verification_settings WHERE guild_id = ?`, [interaction.guild.id], async (err, settings) => {
         if (!settings?.verified_role_id) {
             return interaction.reply({ 
@@ -1499,6 +1747,8 @@ async function handleCreateVerificationPanel(interaction, db) {
         });
     });
 }
+
+// ==================== FUNÇÕES AUXILIARES ====================
 
 // Função auxiliar para coletar estatísticas
 async function gatherAllStats(guildId, db) {
