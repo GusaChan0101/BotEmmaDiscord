@@ -175,7 +175,6 @@ async function animeEmbed(interaction) {
         }
     }
 
-    // Adicionar campos temáticos
     embed.addFields(
         { name: '📺 Gênero', value: 'Anime', inline: true },
         { name: '⭐ Recomendação', value: 'Confira este anime!', inline: true },
@@ -210,7 +209,6 @@ async function gameEmbed(interaction) {
         }
     }
 
-    // Adicionar campos temáticos
     embed.addFields(
         { name: '🎯 Categoria', value: 'Game', inline: true },
         { name: '🏆 Recomendação', value: 'Vale a pena jogar!', inline: true },

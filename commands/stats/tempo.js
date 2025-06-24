@@ -76,9 +76,11 @@ async function showUserTime(interaction, db) {
             let totalTime = 0;
             let sessionTime = 0;
             let isOnline = false;
+            let sessions = 0;
             
             if (result) {
-                totalTime = result.total_time;
+                totalTime = result.total_time || 0;
+                sessions = result.sessions || 0;
                 
                 // Se está em sessão ativa, calcular tempo atual
                 if (result.session_start) {
@@ -114,6 +116,7 @@ async function showUserTime(interaction, db) {
                     let description = `**👤 Usuário:** ${user}\n`;
                     description += `**⏰ Tempo total:** ${formatTime(totalTime)}\n`;
                     description += `**📊 Posição no ranking:** ${position > 0 ? `#${position}` : 'Não ranqueado'}\n`;
+                    description += `**🎯 Sessões totais:** ${sessions}\n`;
                     
                     if (isOnline) {
                         description += `**🔴 Status:** Online em call\n`;
@@ -136,7 +139,12 @@ async function showUserTime(interaction, db) {
                         
                         description += `\n**📈 Detalhes:**\n`;
                         description += `• ${days} dias, ${hours} horas, ${minutes} minutos\n`;
-                        description += `• Média diária: ${formatTime(Math.floor(totalTime / Math.max(days || 1, 1)))}\n`;
+                        if (sessions > 0) {
+                            description += `• Média por sessão: ${formatTime(Math.floor(totalTime / sessions))}\n`;
+                        }
+                        if (days > 0) {
+                            description += `• Média diária: ${formatTime(Math.floor(totalTime / days))}\n`;
+                        }
                     }
                     
                     embed.setDescription(description);
@@ -155,6 +163,7 @@ async function showRanking(interaction, db) {
     db.all(`SELECT user_id, 
                    total_time,
                    session_start,
+                   sessions,
                    CASE 
                        WHEN session_start IS NOT NULL 
                        THEN total_time + (? - session_start)
@@ -188,7 +197,7 @@ async function showRanking(interaction, db) {
                 const statusEmoji = result.session_start ? '🔴' : '🔘';
                 
                 description += `${emoji} **#${position}** ${statusEmoji} **${userName}**\n`;
-                description += `⏰ ${formatTime(result.final_time)}\n\n`;
+                description += `⏰ ${formatTime(result.final_time)} • 🎯 ${result.sessions || 0} sessões\n\n`;
             }
             
             embed.setDescription(description);
@@ -268,7 +277,8 @@ async function showStats(interaction, db) {
                     WHEN session_start IS NOT NULL 
                     THEN total_time + (? - session_start)
                     ELSE total_time
-                END) as max_time
+                END) as max_time,
+                SUM(sessions) as total_sessions
             FROM voice_time 
             WHERE guild_id = ? AND total_time > 0`,
         [now, now, now, interaction.guild.id], async (err, stats) => {
@@ -287,19 +297,43 @@ async function showStats(interaction, db) {
             description += `**⏰ Tempo total acumulado:** ${formatTime(stat.total_time || 0)}\n`;
             description += `**📈 Tempo médio por usuário:** ${formatTime(stat.avg_time || 0)}\n`;
             description += `**🏆 Maior tempo individual:** ${formatTime(stat.max_time || 0)}\n`;
+            description += `**🎯 Total de sessões:** ${stat.total_sessions || 0}\n`;
             
-            // Calcular usuários ativos nas últimas 24h
-            const yesterday = now - 86400;
-            db.get(`SELECT COUNT(*) as active_today 
-                    FROM voice_time 
-                    WHERE guild_id = ? AND session_start > ?`,
-                [interaction.guild.id, yesterday], (err, todayStats) => {
-                    
-                    description += `**📅 Ativos hoje:** ${todayStats?.active_today || 0} usuários\n`;
-                    
-                    embed.setDescription(description);
-                    interaction.editReply({ embeds: [embed] });
+            // Calcular média de sessão
+            if (stat.total_sessions > 0 && stat.total_time > 0) {
+                description += `**📊 Tempo médio por sessão:** ${formatTime(Math.floor(stat.total_time / stat.total_sessions))}\n`;
+            }
+            
+            // Usuários em calls agora
+            const voiceChannels = interaction.guild.channels.cache.filter(c => c.type === 2);
+            let activeInVoice = 0;
+            voiceChannels.forEach(channel => {
+                activeInVoice += channel.members.size;
+            });
+            
+            description += `**🎤 Atualmente em calls:** ${activeInVoice} usuários\n`;
+            
+            embed.setDescription(description);
+            
+            // Adicionar estatísticas de canais de voz
+            if (voiceChannels.size > 0) {
+                let channelInfo = '';
+                voiceChannels.forEach(channel => {
+                    if (channel.members.size > 0) {
+                        channelInfo += `• **${channel.name}:** ${channel.members.size} usuários\n`;
+                    }
                 });
+                
+                if (channelInfo) {
+                    embed.addFields({
+                        name: '🎤 Canais Ativos',
+                        value: channelInfo,
+                        inline: false
+                    });
+                }
+            }
+            
+            await interaction.editReply({ embeds: [embed] });
         });
 }
 
@@ -318,7 +352,33 @@ async function showActiveUsers(interaction, db) {
                 .setTimestamp();
             
             if (!activeUsers || activeUsers.length === 0) {
-                embed.setDescription('😴 Nenhum usuário está atualmente em calls de voz.');
+                // Verificar se há usuários em calls que não estão no banco
+                const voiceChannels = interaction.guild.channels.cache.filter(c => c.type === 2);
+                let usersInVoice = [];
+                
+                voiceChannels.forEach(channel => {
+                    channel.members.forEach(member => {
+                        if (!member.user.bot) {
+                            usersInVoice.push({
+                                user: member,
+                                channel: channel.name,
+                                joinedAt: 'Tempo desconhecido'
+                            });
+                        }
+                    });
+                });
+                
+                if (usersInVoice.length === 0) {
+                    embed.setDescription('😴 Nenhum usuário está atualmente em calls de voz.');
+                } else {
+                    let description = '⚠️ **Usuários em calls (tempo não registrado):**\n\n';
+                    usersInVoice.forEach(({ user, channel }) => {
+                        description += `🔴 **${user.displayName}** em **${channel}**\n`;
+                    });
+                    description += '\n*Estes usuários entraram antes do bot iniciar o rastreamento.*';
+                    embed.setDescription(description);
+                }
+                
                 return interaction.reply({ embeds: [embed] });
             }
             
@@ -336,7 +396,7 @@ async function showActiveUsers(interaction, db) {
                     
                     // Mostrar canal se possível
                     if (user.voice.channel) {
-                        description += `📍 Canal: ${user.voice.channel}\n`;
+                        description += `📍 Canal: **${user.voice.channel.name}**\n`;
                     }
                     
                     description += '\n';
@@ -344,7 +404,7 @@ async function showActiveUsers(interaction, db) {
             }
             
             embed.setDescription(description);
-            embed.setFooter({ text: `${activeUsers.length} usuário(s) ativo(s)` });
+            embed.setFooter({ text: `${activeUsers.length} usuário(s) ativo(s) sendo rastreado(s)` });
             
             await interaction.reply({ embeds: [embed] });
         });

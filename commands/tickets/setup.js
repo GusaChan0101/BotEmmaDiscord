@@ -20,10 +20,6 @@ module.exports = {
                 .addRoleOption(option =>
                     option.setName('suporte')
                         .setDescription('Cargo de suporte')
-                        .setRequired(false))
-                .addRoleOption(option =>
-                    option.setName('conselho')
-                        .setDescription('Cargo do conselho')
                         .setRequired(false)))
         .addSubcommand(subcommand =>
             subcommand
@@ -45,6 +41,14 @@ module.exports = {
                     option.setName('usuario')
                         .setDescription('Usuário para remover')
                         .setRequired(true)))
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('list')
+                .setDescription('Listar tickets ativos'))
+        .addSubcommand(subcommand =>
+            subcommand
+                .setName('stats')
+                .setDescription('Estatísticas de tickets'))
         .setDefaultMemberPermissions(PermissionFlagsBits.ManageChannels),
 
     async execute(interaction, db) {
@@ -63,6 +67,12 @@ module.exports = {
             case 'remove':
                 await removeUserFromTicket(interaction, db);
                 break;
+            case 'list':
+                await listTickets(interaction, db);
+                break;
+            case 'stats':
+                await showTicketStats(interaction, db);
+                break;
         }
     },
 };
@@ -71,21 +81,22 @@ async function setupTickets(interaction, db) {
     const channel = interaction.options.getChannel('canal');
     const category = interaction.options.getChannel('categoria');
     const supportRole = interaction.options.getRole('suporte');
-    const councilRole = interaction.options.getRole('conselho');
     
-    // Salvar configurações
-    db.run(`INSERT OR REPLACE INTO guild_settings 
-            (guild_id, ticket_category_id, support_role_id, council_role_id) 
-            VALUES (?, ?, ?, ?)`,
-        [interaction.guild.id, category.id, supportRole?.id, councilRole?.id]);
+    // Salvar configurações no banco
+    db.run(`UPDATE guild_settings SET ticket_category_id = ?, support_role_id = ? WHERE guild_id = ?`,
+        [category.id, supportRole?.id, interaction.guild.id], function(err) {
+            if (err || this.changes === 0) {
+                // Se não existe registro, criar um novo
+                db.run(`INSERT INTO guild_settings (guild_id, ticket_category_id, support_role_id) VALUES (?, ?, ?)`,
+                    [interaction.guild.id, category.id, supportRole?.id]);
+            }
+        });
     
     // Criar embed do painel
     const embed = new EmbedBuilder()
         .setColor('#fa32fc')
         .setTitle('🎫 Sistema de Tickets')
-
-        // Mensagem do ticket
-.setDescription(`**<:p_tdecorchat4:1385266779475017831> Atendimento Neverland .𝜗𝜚**
+        .setDescription(`**<:p_tdecorchat4:1385266779475017831> Atendimento Neverland .𝜗𝜚**
 
 <:p_starrosa:1383810818868510790> <:p_star:1384924354067824834> <:p_star:1384924354067824834> <:p_star:1384924354067824834> <:p_star:1384924354067824834> <:p_starrosa:1383810818868510790>
 
@@ -101,8 +112,7 @@ Esse chat foi criado com o intuito de ajudar vocês dentro do servidor, retirar 
 ﹒୨ ~~marque a equipe de atendimento.~~ 
 
 *Aguarde a resposta da nossa equipe!*`)
-.setThumbnail(interaction.guild.iconURL())
-
+        .setThumbnail(interaction.guild.iconURL())
         .setFooter({ text: 'Sistema de Tickets Privados - Anime & Games' })
         .setTimestamp();
     
@@ -111,8 +121,8 @@ Esse chat foi criado com o intuito de ajudar vocês dentro do servidor, retirar 
         .addComponents(
             new ButtonBuilder()
                 .setCustomId('create_ticket_support')
-               .setLabel('🎟️ Abrir Ticket')
-                .setStyle(ButtonStyle.Primary),
+                .setLabel('🎟️ Abrir Ticket')
+                .setStyle(ButtonStyle.Primary)
         );
     
     try {
@@ -124,7 +134,7 @@ Esse chat foi criado com o intuito de ajudar vocês dentro do servidor, retirar 
         const successEmbed = new EmbedBuilder()
             .setColor('#00ff00')
             .setTitle('✅ Sistema Configurado')
-            .setDescription(`Painel de tickets enviado para ${channel}!\n\n**Configurações:**\n📁 Categoria: ${category}\n${supportRole ? `🛠️ Suporte: ${supportRole}\n` : ''}${councilRole ? `🏛️ Conselho: ${councilRole}` : ''}`)
+            .setDescription(`Painel de tickets enviado para ${channel}!\n\n**Configurações:**\n📁 Categoria: ${category}\n${supportRole ? `🛠️ Suporte: ${supportRole}\n` : ''}🎫 Sistema ativo e funcionando!`)
             .setTimestamp();
         
         await interaction.reply({ embeds: [successEmbed], ephemeral: true });
@@ -149,45 +159,58 @@ async function closeTicket(interaction, db) {
                                   ticket.user_id === member.id;
             
             if (!hasPermission) {
-                return interaction.reply({ content: 'Você não tem permissão para fechar este ticket!', ephemeral: true });
+                // Verificar se tem cargo de suporte
+                db.get(`SELECT support_role_id FROM guild_settings WHERE guild_id = ?`,
+                    [interaction.guild.id], async (err, settings) => {
+                        if (settings?.support_role_id && member.roles.cache.has(settings.support_role_id)) {
+                            await proceedToClose();
+                        } else {
+                            return interaction.reply({ content: 'Você não tem permissão para fechar este ticket!', ephemeral: true });
+                        }
+                    });
+                return;
             }
             
-            // Atualizar banco
-            db.run(`UPDATE tickets SET status = 'closed', closed_at = ? WHERE id = ?`,
-                [Math.floor(Date.now() / 1000), ticket.id]);
+            await proceedToClose();
             
-            const embed = new EmbedBuilder()
-                .setColor('#ff0000')
-                .setTitle('🔒 Ticket Fechado')
-                .setDescription(`Ticket fechado por ${interaction.user}\n\nEste canal será deletado em 10 segundos...`)
-                .setTimestamp();
-            
-            await interaction.reply({ embeds: [embed] });
-            
-            // Log do ticket (se canal de log configurado)
-            db.get(`SELECT log_channel_id FROM guild_settings WHERE guild_id = ?`,
-                [interaction.guild.id], async (err, settings) => {
-                    if (settings?.log_channel_id) {
-                        const logChannel = interaction.guild.channels.cache.get(settings.log_channel_id);
-                        if (logChannel) {
-                            const logEmbed = new EmbedBuilder()
-                                .setColor('#ff0000')
-                                .setTitle('📋 Ticket Fechado')
-                                .setDescription(`**ID:** ${ticket.ticket_id}\n**Usuário:** <@${ticket.user_id}>\n**Tipo:** ${ticket.type}\n**Fechado por:** ${interaction.user}\n**Duração:** <t:${ticket.created_at}:R>`)
-                                .setTimestamp();
-                            
-                            await logChannel.send({ embeds: [logEmbed] });
+            async function proceedToClose() {
+                // Atualizar banco
+                db.run(`UPDATE tickets SET status = 'closed', closed_at = ?, closed_by = ? WHERE id = ?`,
+                    [Math.floor(Date.now() / 1000), interaction.user.id, ticket.id]);
+                
+                const embed = new EmbedBuilder()
+                    .setColor('#ff0000')
+                    .setTitle('🔒 Ticket Fechado')
+                    .setDescription(`Ticket fechado por ${interaction.user}\n\nEste canal será deletado em 10 segundos...`)
+                    .setTimestamp();
+                
+                await interaction.reply({ embeds: [embed] });
+                
+                // Log do ticket (se canal de log configurado)
+                db.get(`SELECT log_channel_id FROM guild_settings WHERE guild_id = ?`,
+                    [interaction.guild.id], async (err, settings) => {
+                        if (settings?.log_channel_id) {
+                            const logChannel = interaction.guild.channels.cache.get(settings.log_channel_id);
+                            if (logChannel) {
+                                const logEmbed = new EmbedBuilder()
+                                    .setColor('#ff0000')
+                                    .setTitle('📋 Ticket Fechado')
+                                    .setDescription(`**ID:** ${ticket.ticket_id}\n**Usuário:** <@${ticket.user_id}>\n**Tipo:** ${ticket.type}\n**Fechado por:** ${interaction.user}\n**Criado:** <t:${ticket.created_at}:R>`)
+                                    .setTimestamp();
+                                
+                                await logChannel.send({ embeds: [logEmbed] });
+                            }
                         }
+                    });
+                
+                setTimeout(async () => {
+                    try {
+                        await channel.delete();
+                    } catch (error) {
+                        console.error('Erro ao deletar canal:', error);
                     }
-                });
-            
-            setTimeout(async () => {
-                try {
-                    await channel.delete();
-                } catch (error) {
-                    console.error('Erro ao deletar canal:', error);
-                }
-            }, 10000);
+                }, 10000);
+            }
         });
 }
 
@@ -248,4 +271,111 @@ async function removeUserFromTicket(interaction, db) {
                 await interaction.reply({ content: 'Erro ao remover usuário!', ephemeral: true });
             }
         });
+}
+
+async function listTickets(interaction, db) {
+    await interaction.deferReply();
+    
+    db.all(`SELECT * FROM tickets WHERE guild_id = ? AND status = 'open' ORDER BY created_at DESC`,
+        [interaction.guild.id], async (err, tickets) => {
+            if (err || !tickets || tickets.length === 0) {
+                return interaction.editReply({ content: '📭 Nenhum ticket ativo encontrado!' });
+            }
+            
+            const embed = new EmbedBuilder()
+                .setColor('#0099ff')
+                .setTitle('🎫 Tickets Ativos')
+                .setTimestamp();
+            
+            let description = '';
+            
+            for (const ticket of tickets.slice(0, 10)) {
+                const user = await interaction.guild.members.fetch(ticket.user_id).catch(() => null);
+                const userName = user ? user.displayName : 'Usuário não encontrado';
+                const channel = interaction.guild.channels.cache.get(ticket.channel_id);
+                
+                description += `🎫 **${ticket.ticket_id}**\n`;
+                description += `👤 ${userName}\n`;
+                description += `📍 ${channel || 'Canal não encontrado'}\n`;
+                description += `⏰ <t:${ticket.created_at}:R>\n\n`;
+            }
+            
+            embed.setDescription(description);
+            
+            if (tickets.length > 10) {
+                embed.setFooter({ text: `Mostrando 10 de ${tickets.length} tickets` });
+            }
+            
+            await interaction.editReply({ embeds: [embed] });
+        });
+}
+
+async function showTicketStats(interaction, db) {
+    await interaction.deferReply();
+    
+    // Estatísticas gerais
+    db.all(`SELECT 
+                COUNT(*) as total_open,
+                COUNT(CASE WHEN type = 'support' THEN 1 END) as support_count,
+                COUNT(CASE WHEN type = 'verification' THEN 1 END) as verification_count
+            FROM tickets 
+            WHERE guild_id = ? AND status = 'open'`,
+        [interaction.guild.id], async (err, openStats) => {
+            
+            db.all(`SELECT 
+                        COUNT(*) as total_closed,
+                        AVG(closed_at - created_at) as avg_resolution_time
+                    FROM tickets 
+                    WHERE guild_id = ? AND status = 'closed' AND closed_at IS NOT NULL`,
+                [interaction.guild.id], async (err, closedStats) => {
+                    
+                    // Tickets criados hoje
+                    const today = Math.floor(Date.now() / 1000) - 86400;
+                    db.get(`SELECT COUNT(*) as created_today 
+                            FROM tickets
+                            WHERE guild_id = ? AND created_at > ?`,
+                        [interaction.guild.id, today], async (err, todayStats) => {
+                            
+                            const open = openStats[0];
+                            const closed = closedStats[0];
+                            const todayData = todayStats;
+                            
+                            const embed = new EmbedBuilder()
+                                .setColor('#9932cc')
+                                .setTitle('📊 Estatísticas de Tickets')
+                                .setThumbnail(interaction.guild.iconURL())
+                                .setTimestamp();
+                            
+                            let description = `**🎫 Tickets Abertos:** ${open.total_open}\n`;
+                            description += `• 🛠️ Suporte: ${open.support_count}\n`;
+                            description += `• 🛡️ Verificação: ${open.verification_count}\n\n`;
+                            
+                            description += `**📈 Estatísticas Gerais:**\n`;
+                            description += `• ✅ Tickets fechados: ${closed.total_closed || 0}\n`;
+                            if (closed.avg_resolution_time) {
+                                description += `• ⏱️ Tempo médio de resolução: ${formatTime(closed.avg_resolution_time)}\n`;
+                            }
+                            description += `• 📅 Criados hoje: ${todayData.created_today || 0}\n`;
+                            
+                            embed.setDescription(description);
+                            
+                            await interaction.editReply({ embeds: [embed] });
+                        });
+                });
+        });
+}
+
+function formatTime(seconds) {
+    if (!seconds || seconds < 0) return '0s';
+    
+    const days = Math.floor(seconds / 86400);
+    const hours = Math.floor((seconds % 86400) / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    
+    let result = '';
+    if (days > 0) result += `${days}d `;
+    if (hours > 0) result += `${hours}h `;
+    if (minutes > 0) result += `${minutes}m`;
+    
+    return result.trim() || '0m';
 }
