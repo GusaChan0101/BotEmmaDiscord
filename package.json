@@ -1,21 +1,52 @@
 {
   "name": "anime-games-discord-bot",
-  "version": "1.0.0",
-  "description": "Bot completo para servidor de anime e jogos",
+  "version": "2.0.0",
+  "description": "Bot completo para servidor de anime e jogos com sistemas avançados",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
-    "deploy": "node deploy-commands.js"
+    "deploy": "node deploy-commands.js",
+    "test-token": "node test-token.js",
+    "check-commands": "node check-commands.js",
+    "backup": "node scripts/backup.js",
+    "restore": "node scripts/restore.js",
+    "setup": "npm install && npm run deploy && echo '✅ Setup concluído! Use npm start para iniciar o bot.'",
+    "update": "npm install && npm run deploy && echo '✅ Bot atualizado!'",
+    "debug": "node --inspect index.js",
+    "logs": "tail -f logs/bot.log",
+    "clean": "rm -rf node_modules package-lock.json && npm install"
   },
+  "keywords": [
+    "discord",
+    "bot",
+    "anime",
+    "games",
+    "tickets",
+    "vip",
+    "voice-tracking",
+    "moderation",
+    "statistics"
+  ],
+  "author": "Seu Nome",
+  "license": "MIT",
   "dependencies": {
-    "discord.js": "^14.13.0",
+    "discord.js": "^14.14.1",
     "sqlite3": "^5.1.6"
   },
   "devDependencies": {
-    "nodemon": "^3.0.1"
+    "nodemon": "^3.0.2"
   },
   "engines": {
-    "node": ">=16.9.0"
-  }
+    "node": ">=16.9.0",
+    "npm": ">=7.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/seu-usuario/anime-games-bot.git"
+  },
+  "bugs": {
+    "url": "https://github.com/seu-usuario/anime-games-bot/issues"
+  },
+  "homepage": "https://github.com/seu-usuario/anime-games-bot#readme"
 }
